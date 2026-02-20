@@ -77,6 +77,96 @@ irslackd is actively developed and used daily on a 1000+ user Slack workspace.
 
 4. Enjoy a fresh IRC gateway experience.
 
+### OpenClaw integration (this fork)
+
+This fork adds patches to use irslackd as an IRC backend for
+[OpenClaw](https://openclaw.ai), an AI gateway. The changes enable
+irslackd to work with browser-extracted Slack tokens (`xoxc-` + cookie)
+without loading the full workspace user/channel lists on startup.
+
+#### Connecting to Slack with a browser token
+
+Instead of the OAuth app flow, you can extract tokens directly from a
+logged-in Slack browser session:
+
+1. Open Slack in your browser and press F12 to open DevTools.
+2. Go to **Application → Storage → Cookies** and copy the value of the
+   `d` cookie (starts with `xoxd-`). This is your session cookie.
+3. In the browser **Console**, run:
+   ```js
+   JSON.parse(localStorage.localConfig_v2).teams[JSON.parse(localStorage.localConfig_v2).lastActiveTeamId].token
+   ```
+   Copy the result — it starts with `xoxc-`. This is your workspace token.
+4. Combine them as the IRC password:
+   ```
+   xoxc-<token>|<d-cookie>
+   ```
+
+#### Running irslackd for OpenClaw (insecure/local mode)
+
+```bash
+./irslackd --insecure --port 6667 --channels ""
+```
+
+- `--insecure`: no TLS (safe when listening on localhost only)
+- `--channels ""`: block all public Slack channels (only DMs and group
+  DMs pass through); use `--channels "#general,#dev"` to allowlist
+  specific public channels
+
+#### Configuring OpenClaw
+
+In `openclaw.json`, add an IRC channel pointing to irslackd:
+
+```json
+"irc": {
+  "enabled": true,
+  "host": "127.0.0.1",
+  "port": 6667,
+  "tls": false,
+  "nick": "mybot",
+  "password": "xoxc-TOKEN|COOKIE",
+  "channels": ["#_openclaw"],
+  "dmPolicy": "allowlist",
+  "allowFrom": ["your-slack-nick"],
+  "groupPolicy": "allowlist",
+  "groupAllowFrom": ["your-slack-nick", "trusted-colleague"],
+  "groups": {
+    "#_openclaw": { "requireMention": false },
+    "#mpdm-you--colleague--mybot26-1": { "requireMention": false },
+    "*": { "requireMention": true }
+  }
+}
+```
+
+The `#_openclaw` channel is a virtual keepalive channel (no Slack
+backend). OpenClaw must join it — this signals irslackd to start RTM.
+Probe connections (OpenClaw status checks) never join `#_openclaw` and
+therefore never trigger `rtm.connect`, avoiding Slack rate limits.
+
+#### Access control
+
+| Field | Description |
+|-------|-------------|
+| `dmPolicy: "allowlist"` | Only users in `allowFrom` can send direct messages. Use `"open"` + `allowFrom: ["*"]` to allow anyone (not recommended). |
+| `allowFrom` | List of Slack nicks allowed to DM the bot. |
+| `groupPolicy: "allowlist"` | Only group chats listed in `groups` (or matching `"*"`) are bridged. Blocks all other channels including public ones. |
+| `groupAllowFrom` | List of Slack nicks allowed to send messages in any bridged group chat. |
+| `groups` | Per-channel overrides. Use the exact IRC channel name (e.g. `#mpdm-alice--bob--mybot26-1`). `requireMention: false` means the bot responds to every message; `true` requires `@nick`. The `"*"` wildcard applies to all unlisted groups. |
+
+**Safe defaults:** restrict DMs to yourself, list trusted users in `groupAllowFrom`, and require mention (`"*": { "requireMention": true }`) in group chats you don't fully control.
+
+#### Patches in this fork
+
+| Patch | Description |
+|-------|-------------|
+| Skip heavy init | `initUsers`/`initTeams`/`initChannels` skipped — too slow for large workspaces |
+| Early welcome | Full `001`–`376` sequence sent immediately after `initialize()`, not waiting for RTM ready |
+| Keep nick | Configured IRC nick is kept; Slack profile nick override disabled |
+| `#_openclaw` keepalive | Virtual channel with no Slack backend; RTM starts on JOIN |
+| Probe-safe presence | `setPresence('away')` only fires on disconnect if RTM was started |
+| Self-mention translation | Own Slack user ID mapped to IRC nick so `<@USERID>` → `@nick` in messages |
+| `--channels` allowlist | CLI flag to restrict which public Slack channels are bridged |
+
 ### Contribute
 
 * Add more [client configuration notes][5].
